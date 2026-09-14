@@ -39,11 +39,25 @@
 #define PCLK_GPIO_NUM 22
 #define FLASH_GPIO_NUM 4  // the blinding white LED, held off
 
-// Tuning knobs. SVGA at quality 12 is ~25 KB a frame, which a 2.4 GHz link
-// carries at well over the 4 fps the dashboard asks for. Raise FRAME_SIZE
-// once you have seen the RSSI in its final mounting spot, not before.
-#define FRAME_SIZE FRAMESIZE_SVGA
-#define JPEG_QUALITY 12  // lower is better quality and a bigger frame
+// Tuning knobs, and /set changes all of them live - see below. Focus is NOT
+// among them: the OV2640's lens is a threaded barrel you turn by hand, often
+// with threadlock on it from the factory. No register fixes a soft image.
+// Init at UXGA deliberately: the driver sizes its frame buffers once, at
+// init, so starting small and asking for bigger later gets you a buffer that
+// cannot hold the frame. Start at the maximum and step DOWN at runtime.
+#define FRAME_SIZE FRAMESIZE_UXGA
+// ...and what it actually runs at. Measured on this board at quality 10:
+//    800x600   11.7 fps   1733 kbit/s
+//   1024x768    7.5 fps   1954 kbit/s
+//   1280x720    6.5 fps   1935 kbit/s   <- here
+//   1280x1024   3.6 fps   1530 kbit/s
+//   1600x1200   1.3 fps    874 kbit/s
+// Delivered throughput PEAKS at 720p and falls off above it: past that the
+// JPEG encoder does more work for less data out, so the bigger sizes cost
+// frames and give nothing back. The encoder is the ceiling here, not the
+// link - which is why this is a sensor setting and not a WiFi problem.
+#define WORKING_FRAME_SIZE FRAMESIZE_HD  // 1280x720
+#define JPEG_QUALITY 10  // lower is better quality and a bigger frame
 
 static const char *BOUNDARY = "frameboundary";
 static httpd_handle_t server = NULL;
@@ -83,8 +97,11 @@ static bool camera_start() {
     Serial.printf("camera init failed: 0x%x\n", err);
     return false;
   }
-  // The OV2640 on this module is mounted rotated and mirrored.
   sensor_t *s = esp_camera_sensor_get();
+  // Step down from the init size now that the buffers are allocated. Without
+  // this it boots at UXGA and serves 1.2 fps until something calls /set.
+  s->set_framesize(s, WORKING_FRAME_SIZE);
+  // The OV2640 on this module is mounted rotated and mirrored.
   s->set_vflip(s, 1);
   s->set_hmirror(s, 1);
   return true;
@@ -129,6 +146,72 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   return res;
 }
 
+// Chrome stopped supporting multipart/x-mixed-replace for top-level
+// navigations, so browsing straight to /stream paints one frame and then sits
+// there looking like a frozen camera. Inside an <img> it still animates, which
+// is how the dashboard consumes it anyway - so serve the <img> here and give
+// the bare URL something that works.
+static const char VIEWER[] =
+    "<!doctype html><title>k2 cam</title>"
+    "<style>body{margin:0;background:#111;color:#ccc;"
+    "font:13px ui-monospace,monospace}"
+    "img{width:100vw;height:calc(100vh - 24px);object-fit:contain}"
+    "p{margin:0;padding:4px 8px}</style>"
+    "<img id=c src=\"/stream\"><p id=h>connecting</p>"
+    "<script>let n=0,t=Date.now(),p=null,"
+    "v=document.createElement('canvas');v.width=64;v.height=48;"
+    "let x=v.getContext('2d',{willReadFrequently:true});"
+    "setInterval(()=>{let i=document.getElementById('c');"
+    "if(!i.naturalWidth)return;x.drawImage(i,0,0,64,48);"
+    "let d=x.getImageData(0,0,64,48).data,f=0;"
+    "if(p){for(let k=0;k<d.length;k+=4)f+=Math.abs(d[k]-p[k]);}"
+    "if(p&&f>1500)n++;p=d.slice();"
+    "document.getElementById('h').textContent="
+    "n+' frames  '+(n/((Date.now()-t)/1000)).toFixed(1)+' fps'},100)<\/script>";
+
+// Live sensor tuning: /set?quality=10&ae_level=1&framesize=8 ...
+// Exists so that focusing the lens and dialling exposure is a page reload
+// rather than a reflash each time. Deliberately a flat allowlist and no
+// persistence - whatever you settle on gets written into the defaults above.
+static esp_err_t set_handler(httpd_req_t *req) {
+  char q[160], v[16];
+  sensor_t *s = esp_camera_sensor_get();
+  if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK)
+    return httpd_resp_send(req, "usage: /set?quality=10&ae_level=1", HTTPD_RESP_USE_STRLEN);
+
+#define KNOB_T(name, fn, T)                                       \
+  if (httpd_query_key_value(q, name, v, sizeof(v)) == ESP_OK) {   \
+    s->fn(s, (T)atoi(v));                                         \
+  }
+#define KNOB(name, fn) KNOB_T(name, fn, int)
+  KNOB_T("framesize", set_framesize, framesize_t)  // 8=SVGA 10=SXGA 13=UXGA
+  KNOB("quality", set_quality)       // 4..63, lower is better
+  KNOB("brightness", set_brightness) // -2..2
+  KNOB("contrast", set_contrast)     // -2..2
+  KNOB("saturation", set_saturation) // -2..2
+  KNOB("ae_level", set_ae_level)     // -2..2, exposure target
+  KNOB("aec_value", set_aec_value)   // 0..1200, manual exposure
+  KNOB("aec", set_exposure_ctrl)     // 0/1 auto exposure
+  KNOB("agc", set_gain_ctrl)         // 0/1 auto gain
+  KNOB_T("gainceiling", set_gainceiling, gainceiling_t)
+  KNOB("awb", set_whitebal)          // 0/1
+  KNOB("vflip", set_vflip)
+  KNOB("hmirror", set_hmirror)
+#undef KNOB
+#undef KNOB_T
+
+  char out[96];
+  int n = snprintf(out, sizeof(out), "{\"framesize\":%d,\"quality\":%d,\"ae_level\":%d}",
+                   s->status.framesize, s->status.quality, s->status.ae_level);
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, out, n);
+}
+
+static esp_err_t viewer_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, VIEWER, HTTPD_RESP_USE_STRLEN);
+}
+
 static esp_err_t healthz_handler(httpd_req_t *req) {
   char body[192];
   int n = snprintf(body, sizeof(body),
@@ -150,11 +233,15 @@ static void server_start() {
   cfg.max_open_sockets = 3;
   cfg.lru_purge_enable = true;
 
+  httpd_uri_t viewer = {"/", HTTP_GET, viewer_handler, NULL};
+  httpd_uri_t setq = {"/set", HTTP_GET, set_handler, NULL};
   httpd_uri_t snapshot = {"/snapshot", HTTP_GET, snapshot_handler, NULL};
   httpd_uri_t stream = {"/stream", HTTP_GET, stream_handler, NULL};
   httpd_uri_t healthz = {"/healthz", HTTP_GET, healthz_handler, NULL};
 
   if (httpd_start(&server, &cfg) == ESP_OK) {
+    httpd_register_uri_handler(server, &viewer);
+    httpd_register_uri_handler(server, &setq);
     httpd_register_uri_handler(server, &snapshot);
     httpd_register_uri_handler(server, &stream);
     httpd_register_uri_handler(server, &healthz);

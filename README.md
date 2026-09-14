@@ -8,9 +8,11 @@ runs on is `achiappone/pve-stack`.
 
 ## Endpoints
 
+    /           viewer page - the stream in an <img>, with a live fps readout
     /snapshot   one JPEG
     /stream     multipart/x-mixed-replace MJPEG
     /healthz    json - ssid, ip, rssi, psram, heap, uptime
+    /set        live sensor tuning, e.g. /set?framesize=13&quality=10&ae_level=1
 
 These deliberately match what `camera/camrelay.py` in pve-stack already serves
 for the printer's own camera, so the dashboard can proxy either one the same
@@ -42,6 +44,13 @@ resolve a `.local` name, so a session that looked connected from our end was
 half-open and silently dead. Give this board a reserved lease and point the
 dashboard at the number.
 
+**It serves its own viewer page.** Chrome no longer supports
+`multipart/x-mixed-replace` for top-level navigations: browsing straight to
+`/stream` paints the first frame and then sits there, looking exactly like a
+frozen camera while `curl` measures a perfectly healthy 5 fps. It still works
+inside an `<img>`, which is how the dashboard consumes it - so `/` serves that
+`<img>` and the bare URL does the obvious thing.
+
 ## Hard-won details
 
 * **`WiFi.setSleep(false)`.** Modem sleep is on by default and adds seconds of
@@ -65,6 +74,22 @@ dashboard at the number.
   showed 0% loss - so the board looked healthy while only bulk transfers died.
   A marginal link fails on sustained throughput first.
 
+* **720p is the ceiling, and it is the JPEG encoder, not the link.** Measured
+  on this board at quality 10:
+
+      800x600   11.7 fps   1733 kbit/s
+      1024x768   7.5 fps   1954 kbit/s
+      1280x720   6.5 fps   1935 kbit/s   <- default
+      1280x1024  3.6 fps   1530 kbit/s
+      1600x1200  1.3 fps    874 kbit/s
+
+  Delivered throughput *peaks* at 720p and falls off above it - the larger
+  sizes cost frames and hand back nothing. `esp_camera_init` is called at UXGA
+  regardless, because the driver sizes its frame buffers once and asking for a
+  bigger frame later gets you a buffer that cannot hold it; `setup()` steps
+  down to the working size immediately afterwards. Without that step-down the
+  board boots at 1.2 fps until something calls `/set`.
+
 * **Read `rssi` from `/healthz` in the final mounting spot**, not on the bench.
   If this ends up inside the printer's frame the metal will cost more dB than
   the antenna gains.
@@ -78,7 +103,13 @@ dashboard at the number.
     arduino-cli compile --fqbn esp32:esp32:esp32cam .
     arduino-cli upload  --fqbn esp32:esp32:esp32cam -p /dev/cu.usbserial-210 .
 
-Serial is 115200 and prints the SSID, IP and RSSI once it is up.
+Serial is 115200 and prints the SSID, IP and RSSI once it is up. Then open
+`http://<ip>/` and tune with `/set` rather than reflashing - whatever you
+settle on goes into the defaults at the top of the sketch.
+
+Focus is not a setting. The OV2640's lens is a threaded barrel you turn by
+hand, frequently with threadlock on it from the factory, and it wants setting
+at the distance the camera will actually sit from the plate.
 
 Built against esp32 core 3.3.11. Uses ~35% of the default `huge_app`
 partition, so there is room if this ever needs OTA.
