@@ -51,12 +51,23 @@ dashboard at the number.
   when PSRAM is absent, which `/healthz` reports so you can tell.
 * **GPIO 4 is the blinding white flash LED** and is driven low at boot. It will
   come on by itself otherwise.
-* **The u.FL jumper is untouched**, so the PCB trace antenna is the live one.
-  Plugging an external antenna into the connector does nothing until that 0 Ohm
-  link on the underside is moved, and moving it with no antenna attached is
-  worse than leaving it. Read `rssi` from `/healthz` *in the final mounting
-  spot* before deciding - if the board ends up inside the printer's frame, the
-  metal costs more dB than the antenna gains.
+* **The IPEX antenna is not optional on these boards.** They ship with the
+  0 Ohm link already set to the u.FL connector, not to the PCB trace - the
+  2-pack comes with antennas because you are expected to fit them. Run one
+  without and it transmits into an unmatched load: two rooms from the AP that
+  measured **-80 dBm**, and a 16 KB JPEG would start arriving and stall at
+  around 7 KB. Fitting the antenna took the same spot to **-46 dBm** and the
+  stream from 0.2 fps to 6.4 fps. Nothing was soldered; the link was already
+  where it needed to be.
+
+  Worth knowing because the failure does not look like an antenna. Small
+  responses were fine throughout - `/healthz` answered in 60-100 ms and ping
+  showed 0% loss - so the board looked healthy while only bulk transfers died.
+  A marginal link fails on sustained throughput first.
+
+* **Read `rssi` from `/healthz` in the final mounting spot**, not on the bench.
+  If this ends up inside the printer's frame the metal will cost more dB than
+  the antenna gains.
 * **A camera that will not init** is nearly always the ribbon seated badly or a
   5 V rail that sags when the sensor starts. `setup()` says so and reboots
   rather than serving black frames.

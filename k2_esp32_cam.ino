@@ -8,7 +8,10 @@
 // /snapshot, /stream, /healthz - so the dashboard can treat the printer's
 // WebRTC feed and this one identically.
 //
-// Board: esp32:esp32:esp32cam    Antenna: PCB trace (u.FL jumper untouched)
+// Board: esp32:esp32:esp32cam
+// Antenna: the IPEX one that came with it, fitted. These ship with the
+// 0 Ohm link on the u.FL connector rather than the trace, so running
+// bare costs ~33 dB - see the README.
 
 #include <WiFi.h>
 #include <WiFiMulti.h>
