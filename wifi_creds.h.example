@@ -1,0 +1,9 @@
+// Copy to wifi_creds.h and fill in. That file is gitignored - this repo
+// already documents the office LAN topology, it does not also get the key.
+//
+// Both networks are registered at boot; WiFiMulti joins whichever is in
+// range, so the same firmware runs at home and at the shop with no reflash.
+#define HOME_SSID "your-home-ssid"
+#define HOME_PW   "your-home-password"
+#define WORK_SSID "the-shop-ssid"
+#define WORK_PW   "the-shop-password"
